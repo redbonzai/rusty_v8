@@ -1,8 +1,11 @@
 // Copyright 2019-2021 the Deno authors. All rights reserved. MIT license.
+#include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
+#include <memory>
 
 #include "support.h"
 #include "unicode/locid.h"
@@ -16,9 +19,12 @@
 #include "v8/include/v8.h"
 #include "v8/src/api/api-inl.h"
 #include "v8/src/api/api.h"
+#include "v8/src/base/debug/stack_trace.h"
+#include "v8/src/base/sys-info.h"
 #include "v8/src/execution/isolate-utils-inl.h"
 #include "v8/src/execution/isolate-utils.h"
 #include "v8/src/flags/flags.h"
+#include "v8/src/libplatform/default-platform.h"
 #include "v8/src/objects/objects-inl.h"
 #include "v8/src/objects/objects.h"
 #include "v8/src/objects/smi.h"
@@ -64,6 +70,10 @@ static_assert(sizeof(v8::ReturnValue<v8::Value>) == sizeof(size_t) * 1,
 static_assert(sizeof(v8::TryCatch) == sizeof(size_t) * 6,
               "TryCatch size mismatch");
 
+static_assert(sizeof(v8::Isolate::AllowJavascriptExecutionScope) ==
+                  sizeof(size_t) * 2,
+              "AllowJavascriptExecutionScope size mismatch");
+
 static_assert(sizeof(v8::Location) == sizeof(int) * 2,
               "Location size mismatch");
 
@@ -87,6 +97,9 @@ static_assert(offsetof(v8::ScriptCompiler::CachedData, rejected) == 12,
               "CachedData.rejected offset mismatch");
 static_assert(offsetof(v8::ScriptCompiler::CachedData, buffer_policy) == 16,
               "CachedData.buffer_policy offset mismatch");
+static_assert(sizeof(v8::Isolate::DisallowJavascriptExecutionScope) ==
+                  16,
+              "DisallowJavascriptExecutionScope size mismatch");
 #else
 static_assert(sizeof(v8::ScriptCompiler::CachedData) == 16,
               "CachedData size mismatch");
@@ -98,6 +111,9 @@ static_assert(offsetof(v8::ScriptCompiler::CachedData, rejected) == 8,
               "CachedData.rejected offset mismatch");
 static_assert(offsetof(v8::ScriptCompiler::CachedData, buffer_policy) == 12,
               "CachedData.buffer_policy offset mismatch");
+static_assert(sizeof(v8::Isolate::DisallowJavascriptExecutionScope) ==
+                  12,
+              "DisallowJavascriptExecutionScope size mismatch");
 #endif
 
 extern "C" {
@@ -463,8 +479,8 @@ uint32_t v8__ScriptCompiler__CachedDataVersionTag() {
   return v8::ScriptCompiler::CachedDataVersionTag();
 }
 
-size_t v8__TypedArray__Length(const v8::TypedArray* self) { 
-  return ptr_to_local(self)->Length(); 
+size_t v8__TypedArray__Length(const v8::TypedArray* self) {
+  return ptr_to_local(self)->Length();
 }
 size_t v8__TypedArray__kMaxLength() { return v8::TypedArray::kMaxLength; }
 
@@ -473,17 +489,17 @@ bool v8__Data__EQ(const v8::Data& self, const v8::Data& other) {
 }
 
 bool v8__Data__IsBigInt(const v8::Data& self) {
-  return v8::Utils::OpenHandle(&self)->IsBigInt();
+  return IsBigInt(*v8::Utils::OpenHandle(&self));
 }
 
 bool v8__Data__IsBoolean(const v8::Data& self) {
-  return v8::Utils::OpenHandle(&self)->IsBoolean();
+  return IsBoolean(*v8::Utils::OpenHandle(&self));
 }
 
 bool v8__Data__IsContext(const v8::Data& self) { return self.IsContext(); }
 
 bool v8__Data__IsFixedArray(const v8::Data& self) {
-  return v8::Utils::OpenHandle(&self)->IsFixedArray();
+  return IsFixedArray(*v8::Utils::OpenHandle(&self));
 }
 
 bool v8__Data__IsFunctionTemplate(const v8::Data& self) {
@@ -493,15 +509,15 @@ bool v8__Data__IsFunctionTemplate(const v8::Data& self) {
 bool v8__Data__IsModule(const v8::Data& self) { return self.IsModule(); }
 
 bool v8__Data__IsModuleRequest(const v8::Data& self) {
-  return v8::Utils::OpenHandle(&self)->IsModuleRequest();
+  return IsModuleRequest(*v8::Utils::OpenHandle(&self));
 }
 
 bool v8__Data__IsName(const v8::Data& self) {
-  return v8::Utils::OpenHandle(&self)->IsName();
+  return IsName(*v8::Utils::OpenHandle(&self));
 }
 
 bool v8__Data__IsNumber(const v8::Data& self) {
-  return v8::Utils::OpenHandle(&self)->IsNumber();
+  return IsNumber(*v8::Utils::OpenHandle(&self));
 }
 
 bool v8__Data__IsObjectTemplate(const v8::Data& self) {
@@ -509,17 +525,17 @@ bool v8__Data__IsObjectTemplate(const v8::Data& self) {
 }
 
 bool v8__Data__IsPrimitive(const v8::Data& self) {
-  return v8::Utils::OpenHandle(&self)->IsPrimitive() && !self.IsPrivate();
+  return IsPrimitive(*v8::Utils::OpenHandle(&self)) && !self.IsPrivate();
 }
 
 bool v8__Data__IsPrivate(const v8::Data& self) { return self.IsPrivate(); }
 
 bool v8__Data__IsString(const v8::Data& self) {
-  return v8::Utils::OpenHandle(&self)->IsString();
+  return IsString(*v8::Utils::OpenHandle(&self));
 }
 
 bool v8__Data__IsSymbol(const v8::Data& self) {
-  return v8::Utils::OpenHandle(&self)->IsPublicSymbol();
+  return IsPublicSymbol(*v8::Utils::OpenHandle(&self));
 }
 
 bool v8__Data__IsValue(const v8::Data& self) { return self.IsValue(); }
@@ -850,7 +866,14 @@ two_pointers_t v8__ArrayBuffer__GetBackingStore(const v8::ArrayBuffer& self) {
   return make_pod<two_pointers_t>(ptr_to_local(&self)->GetBackingStore());
 }
 
-bool v8__BackingStore__IsResizableByUserJavaScript(const v8::BackingStore& self) {
+v8::BackingStore* v8__BackingStore__EmptyBackingStore(bool shared) {
+  std::unique_ptr<i::BackingStoreBase> u = 
+      i::BackingStore::EmptyBackingStore(shared ? i::SharedFlag::kShared : i::SharedFlag::kNotShared);
+  return static_cast<v8::BackingStore*>(u.release());
+}
+
+bool v8__BackingStore__IsResizableByUserJavaScript(
+    const v8::BackingStore& self) {
   return ptr_to_local(&self)->IsResizableByUserJavaScript();
 }
 
@@ -1013,6 +1036,33 @@ class ExternalStaticOneByteStringResource
   const int _length;
 };
 
+// NOTE: This class is never used and only serves as a reference for
+// the OneByteConst struct created on Rust-side.
+class ExternalConstOneByteStringResource
+    : public v8::String::ExternalOneByteStringResource {
+ public:
+  ExternalConstOneByteStringResource(int length)
+      : _length(length) {
+    static_assert(offsetof(ExternalConstOneByteStringResource, _length) == sizeof(size_t) * 2,
+                  "ExternalConstOneByteStringResource's length was not at offset of sizeof(size_t) * 2");
+    static_assert(sizeof(ExternalConstOneByteStringResource) == sizeof(size_t) * 3,
+                  "ExternalConstOneByteStringResource size was not sizeof(size_t) * 3");
+    static_assert(alignof(ExternalConstOneByteStringResource) == sizeof(size_t),
+                  "ExternalConstOneByteStringResource align was not sizeof(size_t)");
+  }
+  const char* data() const override { return nullptr; }
+  size_t length() const override { return _length; }
+  void Dispose() override {}
+
+ private:
+  const int _length;
+};
+
+const v8::String* v8__String__NewExternalOneByte(
+    v8::Isolate* isolate, v8::String::ExternalOneByteStringResource* resource) {
+  return maybe_local_to_ptr(v8::String::NewExternalOneByte(isolate, resource));
+}
+
 const v8::String* v8__String__NewExternalOneByteStatic(v8::Isolate* isolate,
                                                        const char* data,
                                                        int length) {
@@ -1134,7 +1184,7 @@ void v8__ObjectTemplate__SetAccessor(
     const v8::ObjectTemplate& self, const v8::Name& key,
     v8::AccessorNameGetterCallback getter,
     v8::AccessorNameSetterCallback setter,
-    const v8::Value* data_or_null, 
+    const v8::Value* data_or_null,
     v8::PropertyAttribute attr) {
   ptr_to_local(&self)->SetAccessor(
     ptr_to_local(&key), getter, setter,  ptr_to_local(data_or_null), v8::AccessControl::DEFAULT,
@@ -1150,8 +1200,7 @@ void v8__ObjectTemplate__SetNamedPropertyHandler(
     v8::GenericNamedPropertyEnumeratorCallback enumerator,
     v8::GenericNamedPropertyDefinerCallback definer,
     v8::GenericNamedPropertyDescriptorCallback descriptor,
-    const v8::Value* data_or_null,
-    v8::PropertyHandlerFlags flags) {
+    const v8::Value* data_or_null, v8::PropertyHandlerFlags flags) {
   ptr_to_local(&self)->SetHandler(v8::NamedPropertyHandlerConfiguration(
       getter, setter, query, deleter, enumerator, definer, descriptor,
       ptr_to_local(data_or_null), flags));
@@ -1165,8 +1214,7 @@ void v8__ObjectTemplate__SetIndexedPropertyHandler(
     v8::IndexedPropertyEnumeratorCallback enumerator,
     v8::IndexedPropertyDefinerCallback definer,
     v8::IndexedPropertyDescriptorCallback descriptor,
-    const v8::Value* data_or_null,
-    v8::PropertyHandlerFlags flags) {
+    const v8::Value* data_or_null, v8::PropertyHandlerFlags flags) {
   ptr_to_local(&self)->SetHandler(v8::IndexedPropertyHandlerConfiguration(
       getter, setter, query, deleter, enumerator, definer, descriptor,
       ptr_to_local(data_or_null), flags));
@@ -1269,9 +1317,9 @@ MaybeBool v8__Object__DefineOwnProperty(const v8::Object& self,
 }
 
 MaybeBool v8__Object__DefineProperty(const v8::Object& self,
-                                        const v8::Context& context,
-                                        const v8::Name& key,
-                                        v8::PropertyDescriptor& desc) {
+                                     const v8::Context& context,
+                                     const v8::Name& key,
+                                     v8::PropertyDescriptor& desc) {
   return maybe_to_maybe_bool(ptr_to_local(&self)->DefineProperty(
       ptr_to_local(&context), ptr_to_local(&key), desc));
 }
@@ -1279,13 +1327,13 @@ MaybeBool v8__Object__DefineProperty(const v8::Object& self,
 MaybeBool v8__Object__SetAccessor(const v8::Object& self,
                                   const v8::Context& context,
                                   const v8::Name& key,
-                                  v8::AccessorNameGetterCallback getter, 
+                                  v8::AccessorNameGetterCallback getter,
                                   v8::AccessorNameSetterCallback setter,
-                                  const v8::Value* data_or_null, 
+                                  const v8::Value* data_or_null,
                                   v8::PropertyAttribute attr) {
   return maybe_to_maybe_bool(ptr_to_local(&self)->SetAccessor(
       ptr_to_local(&context), ptr_to_local(&key), getter, setter,
-      ptr_to_local(data_or_null), v8::AccessControl::DEFAULT,attr));
+      ptr_to_local(data_or_null), v8::AccessControl::DEFAULT, attr));
 }
 
 v8::Isolate* v8__Object__GetIsolate(const v8::Object& self) {
@@ -1430,20 +1478,25 @@ MaybeBool v8__Object__HasPrivate(const v8::Object& self,
       ptr_to_local(&context), ptr_to_local(&key)));
 }
 
-void v8__Object__GetPropertyAttributes(
-    const v8::Object& self, const v8::Context& context,
-    const v8::Value& key, v8::Maybe<v8::PropertyAttribute>* out) {
+void v8__Object__GetPropertyAttributes(const v8::Object& self,
+                                       const v8::Context& context,
+                                       const v8::Value& key,
+                                       v8::Maybe<v8::PropertyAttribute>* out) {
   *out = ptr_to_local(&self)->GetPropertyAttributes(ptr_to_local(&context),
                                                     ptr_to_local(&key));
 }
 
 const v8::Value* v8__Object__GetOwnPropertyDescriptor(
-    const v8::Object& self, const v8::Context& context,
-    const v8::Name& key) {
+    const v8::Object& self, const v8::Context& context, const v8::Name& key) {
   return maybe_local_to_ptr(ptr_to_local(&self)->GetOwnPropertyDescriptor(
       ptr_to_local(&context), ptr_to_local(&key)));
 }
 
+const v8::Array* v8__Object__PreviewEntries(
+    const v8::Object& self,
+    bool* is_key_value) {
+  return maybe_local_to_ptr(ptr_to_local(&self)->PreviewEntries(is_key_value));
+}
 
 const v8::Array* v8__Array__New(v8::Isolate* isolate, int length) {
   return local_to_ptr(v8::Array::New(isolate, length));
@@ -1530,7 +1583,7 @@ void v8__Set__Clear(const v8::Set& self) {
 }
 
 v8::Set* v8__Set__Add(const v8::Set& self, const v8::Context& context,
-                              const v8::Value& key) {
+                      const v8::Value& key) {
   return maybe_local_to_ptr(
       ptr_to_local(&self)->Add(ptr_to_local(&context), ptr_to_local(&key)));
 }
@@ -1608,6 +1661,11 @@ void v8__BigInt__ToWordsArray(const v8::BigInt& self, int* sign_bit,
 const v8::ArrayBuffer* v8__ArrayBufferView__Buffer(
     const v8::ArrayBufferView& self) {
   return local_to_ptr(ptr_to_local(&self)->Buffer());
+}
+
+const void* v8__ArrayBufferView__Buffer__Data(
+    const v8::ArrayBufferView& self) {
+  return ptr_to_local(&self)->Buffer()->Data();
 }
 
 size_t v8__ArrayBufferView__ByteLength(const v8::ArrayBufferView& self) {
@@ -1778,11 +1836,10 @@ void v8__Context__SetPromiseHooks(v8::Context& self,
 
 const v8::Value* v8__Context__GetSecurityToken(const v8::Context& self) {
   auto value = ptr_to_local(&self)->GetSecurityToken();
-  return local_to_ptr(value); 
+  return local_to_ptr(value);
 }
 
-void v8__Context__SetSecurityToken(v8::Context& self,
-                                                       const v8::Value* token) {
+void v8__Context__SetSecurityToken(v8::Context& self, const v8::Value* token) {
   auto c = ptr_to_local(&self);
   c->SetSecurityToken(ptr_to_local(token));
 }
@@ -1792,11 +1849,11 @@ void v8__Context__UseDefaultSecurityToken(v8::Context& self) {
 }
 
 void v8__Context__AllowCodeGenerationFromStrings(v8::Context& self, bool allow) {
-   ptr_to_local(&self)->AllowCodeGenerationFromStrings(allow); 
+   ptr_to_local(&self)->AllowCodeGenerationFromStrings(allow);
 }
 
 bool v8__Context_IsCodeGenerationFromStringsAllowed(v8::Context& self) {
-   return ptr_to_local(&self)->IsCodeGenerationFromStringsAllowed();
+  return ptr_to_local(&self)->IsCodeGenerationFromStringsAllowed();
 }
 
 const v8::Context* v8__Context__FromSnapshot(v8::Isolate* isolate,
@@ -1952,6 +2009,17 @@ int v8__Function__GetScriptLineNumber(const v8::Function& self) {
   return ptr_to_local(&self)->GetScriptLineNumber();
 }
 
+int v8__Function__ScriptId(const v8::Function& self) {
+  return ptr_to_local(&self)->ScriptId();
+}
+
+const v8::ScriptOrigin* v8__Function__GetScriptOrigin(
+    const v8::Function& self) {
+  std::unique_ptr<v8::ScriptOrigin> u = std::make_unique<v8::ScriptOrigin>(
+      ptr_to_local(&self)->GetScriptOrigin());
+  return u.release();
+}
+
 const v8::Signature* v8__Signature__New(v8::Isolate* isolate,
                                         const v8::FunctionTemplate* templ) {
   return local_to_ptr(v8::Signature::New(isolate, ptr_to_local(templ)));
@@ -1977,11 +2045,11 @@ v8::CTypeInfo* v8__CTypeInfo__New__From__Slice(unsigned int len,
   return v;
 }
 
-v8::CFunctionInfo* v8__CFunctionInfo__New(const v8::CTypeInfo& return_info,
-                                          unsigned int args_len,
-                                          v8::CTypeInfo* args_info) {
+v8::CFunctionInfo* v8__CFunctionInfo__New(
+    const v8::CTypeInfo& return_info, unsigned int args_len,
+    v8::CTypeInfo* args_info, v8::CFunctionInfo::Int64Representation repr) {
   std::unique_ptr<v8::CFunctionInfo> info = std::make_unique<v8::CFunctionInfo>(
-      v8::CFunctionInfo(return_info, args_len, args_info));
+      v8::CFunctionInfo(return_info, args_len, args_info, repr));
   return info.release();
 }
 
@@ -2103,7 +2171,7 @@ const v8::StackTrace* v8__StackTrace__CurrentStackTrace(v8::Isolate* isolate,
 }
 
 const v8::String* v8__StackTrace__CurrentScriptNameOrSourceURL(
-  v8::Isolate* isolate) {
+    v8::Isolate* isolate) {
   return local_to_ptr(v8::StackTrace::CurrentScriptNameOrSourceURL(isolate));
 }
 
@@ -2208,6 +2276,30 @@ void v8__TryCatch__SetCaptureMessage(v8::TryCatch* self, bool value) {
   self->SetCaptureMessage(value);
 }
 
+void v8__DisallowJavascriptExecutionScope__CONSTRUCT(
+    uninit_t<v8::Isolate::DisallowJavascriptExecutionScope>* buf,
+    v8::Isolate* isolate,
+    v8::Isolate::DisallowJavascriptExecutionScope::OnFailure on_failure) {
+  construct_in_place<v8::Isolate::DisallowJavascriptExecutionScope>(
+      buf, isolate, on_failure);
+}
+
+void v8__DisallowJavascriptExecutionScope__DESTRUCT(
+    v8::Isolate::DisallowJavascriptExecutionScope* self) {
+  self->~DisallowJavascriptExecutionScope();
+}
+
+void v8__AllowJavascriptExecutionScope__CONSTRUCT(
+    uninit_t<v8::Isolate::AllowJavascriptExecutionScope>* buf,
+    v8::Isolate* isolate) {
+  construct_in_place<v8::Isolate::AllowJavascriptExecutionScope>(buf, isolate);
+}
+
+void v8__AllowJavascriptExecutionScope__DESTRUCT(
+    v8::Isolate::AllowJavascriptExecutionScope* self) {
+  self->~AllowJavascriptExecutionScope();
+}
+
 #define V(NAME)                                                          \
   const v8::NAME* v8__##NAME##__New(const v8::ArrayBuffer& buf_ptr,      \
                                     size_t byte_offset, size_t length) { \
@@ -2277,6 +2369,18 @@ void v8__ScriptOrigin__CONSTRUCT(
       buf, isolate, ptr_to_local(&resource_name), resource_line_offset,
       resource_column_offset, resource_is_shared_cross_origin, script_id,
       ptr_to_local(&source_map_url), resource_is_opaque, is_wasm, is_module);
+}
+
+int v8__ScriptOrigin__ScriptId(const v8::ScriptOrigin& self) {
+  return ptr_to_local(&self)->ScriptId();
+}
+
+const v8::Value* v8__ScriptOrigin__ResourceName(const v8::ScriptOrigin& self) {
+  return local_to_ptr(ptr_to_local(&self)->ResourceName());
+}
+
+const v8::Value* v8__ScriptOrigin__SourceMapUrl(const v8::ScriptOrigin& self) {
+  return local_to_ptr(ptr_to_local(&self)->SourceMapUrl());
 }
 
 const v8::Value* v8__ScriptOrModule__GetResourceName(
@@ -2491,9 +2595,62 @@ v8::StartupData v8__SnapshotCreator__CreateBlob(
   return self->CreateBlob(function_code_handling);
 }
 
+class UnprotectedDefaultPlatform : public v8::platform::DefaultPlatform {
+  using IdleTaskSupport = v8::platform::IdleTaskSupport;
+  using InProcessStackDumping = v8::platform::InProcessStackDumping;
+  using PriorityMode = v8::platform::PriorityMode;
+  using TracingController = v8::TracingController;
+
+  static constexpr int kMaxThreadPoolSize = 16;
+
+ public:
+  explicit UnprotectedDefaultPlatform(
+      int thread_pool_size, IdleTaskSupport idle_task_support,
+      std::unique_ptr<TracingController> tracing_controller = {},
+      PriorityMode priority_mode = PriorityMode::kDontApply)
+      : v8::platform::DefaultPlatform(thread_pool_size, idle_task_support,
+                                      std::move(tracing_controller),
+                                      priority_mode) {}
+
+  static std::unique_ptr<v8::Platform> New(
+      int thread_pool_size, IdleTaskSupport idle_task_support,
+      InProcessStackDumping in_process_stack_dumping,
+      std::unique_ptr<TracingController> tracing_controller = {},
+      PriorityMode priority_mode = PriorityMode::kDontApply) {
+    // This implementation is semantically equivalent to the implementation of
+    // `v8::platform::NewDefaultPlatform()`.
+    DCHECK_GE(thread_pool_size, 0);
+    if (thread_pool_size < 1) {
+      thread_pool_size =
+          std::max(v8::base::SysInfo::NumberOfProcessors() - 1, 1);
+    }
+    thread_pool_size = std::min(thread_pool_size, kMaxThreadPoolSize);
+    if (in_process_stack_dumping == InProcessStackDumping::kEnabled) {
+      v8::base::debug::EnableInProcessStackDumping();
+    }
+    return std::make_unique<UnprotectedDefaultPlatform>(
+        thread_pool_size, idle_task_support, std::move(tracing_controller),
+        priority_mode);
+  }
+
+  v8::ThreadIsolatedAllocator* GetThreadIsolatedAllocator() override {
+    return nullptr;
+  }
+};
+
 v8::Platform* v8__Platform__NewDefaultPlatform(int thread_pool_size,
                                                bool idle_task_support) {
   return v8::platform::NewDefaultPlatform(
+             thread_pool_size,
+             idle_task_support ? v8::platform::IdleTaskSupport::kEnabled
+                               : v8::platform::IdleTaskSupport::kDisabled,
+             v8::platform::InProcessStackDumping::kDisabled, nullptr)
+      .release();
+}
+
+v8::Platform* v8__Platform__NewUnprotectedDefaultPlatform(
+    int thread_pool_size, bool idle_task_support) {
+  return UnprotectedDefaultPlatform::New(
              thread_pool_size,
              idle_task_support ? v8::platform::IdleTaskSupport::kEnabled
                                : v8::platform::IdleTaskSupport::kDisabled,
@@ -2976,7 +3133,7 @@ v8::Isolate* v8__internal__GetIsolateFromHeapObject(const v8::Data& data) {
   namespace i = v8::internal;
   i::Object object(reinterpret_cast<const i::Address&>(data));
   i::Isolate* isolate;
-  return object.IsHeapObject() &&
+  return IsHeapObject(object) &&
                  i::GetIsolateFromHeapObject(object.GetHeapObject(), &isolate)
              ? reinterpret_cast<v8::Isolate*>(isolate)
              : nullptr;
@@ -2986,10 +3143,10 @@ int v8__Value__GetHash(const v8::Value& data) {
   namespace i = v8::internal;
   i::Object object(reinterpret_cast<const i::Address&>(data));
   i::Isolate* isolate;
-  int hash = object.IsHeapObject() && i::GetIsolateFromHeapObject(
+  int hash = IsHeapObject(object) && i::GetIsolateFromHeapObject(
                                           object.GetHeapObject(), &isolate)
-                 ? object.GetOrCreateHash(isolate).value()
-                 : i::Smi::ToInt(object.GetHash());
+                 ? i::Object::GetOrCreateHash(object, isolate).value()
+                 : i::Smi::ToInt(i::Object::GetHash(object));
   assert(hash != 0);
   return hash;
 }
@@ -3313,8 +3470,8 @@ void v8__CompiledWasmModule__DELETE(v8::CompiledWasmModule* self) {
 extern "C" {
 
 size_t icu_get_default_locale(char* output, size_t output_len) {
-  const icu_72::Locale& default_locale = icu::Locale::getDefault();
-  icu_72::CheckedArrayByteSink sink(output, static_cast<uint32_t>(output_len));
+  const icu_73::Locale& default_locale = icu::Locale::getDefault();
+  icu_73::CheckedArrayByteSink sink(output, static_cast<uint32_t>(output_len));
   UErrorCode status = U_ZERO_ERROR;
   default_locale.toLanguageTag(sink, status);
   assert(status == U_ZERO_ERROR);
@@ -3398,8 +3555,7 @@ bool v8__PropertyDescriptor__has_enumerable(
   return self->has_enumerable();
 }
 
-bool v8__PropertyDescriptor__has_writable(
-    const v8::PropertyDescriptor* self) {
+bool v8__PropertyDescriptor__has_writable(const v8::PropertyDescriptor* self) {
   return self->has_writable();
 }
 
@@ -3416,12 +3572,12 @@ bool v8__PropertyDescriptor__has_set(const v8::PropertyDescriptor* self) {
 }
 
 void v8__PropertyDescriptor__set_enumerable(v8::PropertyDescriptor* self,
-                                       bool enumurable) {
+                                            bool enumurable) {
   self->set_enumerable(enumurable);
 }
 
 void v8__PropertyDescriptor__set_configurable(v8::PropertyDescriptor* self,
-                                       bool configurable) {
+                                              bool configurable) {
   self->set_configurable(configurable);
 }
 

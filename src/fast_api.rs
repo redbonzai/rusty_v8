@@ -17,6 +17,7 @@ extern "C" {
     return_info: *const CTypeInfo,
     args_len: usize,
     args_info: *const CTypeInfo,
+    repr: Int64Representation,
   ) -> *mut CFunctionInfo;
 }
 
@@ -34,8 +35,14 @@ impl CFunctionInfo {
     args: *const CTypeInfo,
     args_len: usize,
     return_type: *const CTypeInfo,
+    repr: Int64Representation,
   ) -> NonNull<CFunctionInfo> {
-    NonNull::new_unchecked(v8__CFunctionInfo__New(return_type, args_len, args))
+    NonNull::new_unchecked(v8__CFunctionInfo__New(
+      return_type,
+      args_len,
+      args,
+      repr,
+    ))
   }
 }
 
@@ -77,7 +84,7 @@ pub enum SequenceType {
   IsArrayBuffer,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 #[non_exhaustive]
 pub enum CType {
@@ -100,11 +107,12 @@ pub enum CType {
   CallbackOptions = 255,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum Type {
   Void,
   Bool,
+  Uint8,
   Int32,
   Uint32,
   Int64,
@@ -125,6 +133,7 @@ impl From<&Type> for CType {
     match ty {
       Type::Void => CType::Void,
       Type::Bool => CType::Bool,
+      Type::Uint8 => CType::Uint8,
       Type::Int32 => CType::Int32,
       Type::Uint32 => CType::Uint32,
       Type::Int64 => CType::Int64,
@@ -219,35 +228,64 @@ pub struct FastApiOneByteString {
 impl FastApiOneByteString {
   #[inline(always)]
   pub fn as_bytes(&self) -> &[u8] {
+    // Ensure that we never create a null-ptr slice (even a zero-length null-ptr slice
+    // is invalid because of Rust's niche packing).
+    if self.data.is_null() {
+      return &mut [];
+    }
+
     // SAFETY: The data is guaranteed to be valid for the length of the string.
     unsafe { std::slice::from_raw_parts(self.data, self.length as usize) }
   }
 }
 
 impl<T: Default> FastApiTypedArray<T> {
+  /// Performs an unaligned-safe read of T from the underlying data.
   #[inline(always)]
-  pub fn get(&self, index: usize) -> T {
+  pub const fn get(&self, index: usize) -> T {
     debug_assert!(index < self.length);
-    let mut t: T = Default::default();
-    unsafe {
-      ptr::copy_nonoverlapping(self.data.add(index), &mut t, 1);
-    }
-    t
+    // SAFETY: src is valid for reads, and is a valid value for T
+    unsafe { ptr::read_unaligned(self.data.add(index)) }
   }
 
+  /// Given a pointer to a `FastApiTypedArray`, returns a slice pointing to the
+  /// data if safe to do so.
+  ///
+  /// # Safety
+  ///
+  /// The pointer must not be null and the caller must choose a lifetime that is
+  /// safe.
+  #[inline(always)]
+  pub unsafe fn get_storage_from_pointer_if_aligned<'a>(
+    ptr: *mut Self,
+  ) -> Option<&'a mut [T]> {
+    debug_assert!(!ptr.is_null());
+    let self_ref = ptr.as_mut().unwrap_unchecked();
+    self_ref.get_storage_if_aligned()
+  }
+
+  /// Returns a slice pointing to the underlying data if safe to do so.
   #[inline(always)]
   pub fn get_storage_if_aligned(&self) -> Option<&mut [T]> {
-    if (self.data as usize) % align_of::<T>() != 0 {
+    // V8 may provide an invalid or null pointer when length is zero, so we just
+    // ignore that value completely and create an empty slice in this case.
+    if self.length == 0 {
+      return Some(&mut []);
+    }
+    // Ensure that we never return an unaligned or null buffer
+    if self.data.is_null() || (self.data as usize) % align_of::<T>() != 0 {
       return None;
     }
     Some(unsafe { std::slice::from_raw_parts_mut(self.data, self.length) })
   }
 }
 
+#[derive(Copy, Clone)]
 pub struct FastFunction {
   pub args: &'static [Type],
-  pub return_type: CType,
   pub function: *const c_void,
+  pub repr: Int64Representation,
+  pub return_type: CType,
 }
 
 impl FastFunction {
@@ -259,8 +297,29 @@ impl FastFunction {
   ) -> Self {
     Self {
       args,
-      return_type,
       function,
+      repr: Int64Representation::Number,
+      return_type,
     }
   }
+
+  pub const fn new_with_bigint(
+    args: &'static [Type],
+    return_type: CType,
+    function: *const c_void,
+  ) -> Self {
+    Self {
+      args,
+      function,
+      repr: Int64Representation::BigInt,
+      return_type,
+    }
+  }
+}
+
+#[derive(Copy, Clone, Debug)]
+#[repr(u8)]
+pub enum Int64Representation {
+  Number = 0,
+  BigInt = 1,
 }

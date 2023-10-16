@@ -568,9 +568,9 @@ impl Value {
 
   /// Convenience function not present in the original V8 API.
   #[inline(always)]
-  pub fn to_rust_string_lossy<'s>(
+  pub fn to_rust_string_lossy(
     &self,
-    scope: &mut HandleScope<'s>,
+    scope: &mut HandleScope,
   ) -> std::string::String {
     self
       .to_string(scope)
@@ -646,9 +646,9 @@ impl Value {
   }
 
   #[inline(always)]
-  pub fn instance_of<'s>(
+  pub fn instance_of(
     &self,
-    scope: &mut HandleScope<'s>,
+    scope: &mut HandleScope,
     object: Local<Object>,
   ) -> Option<bool> {
     let mut out = Maybe::<bool>::default();
@@ -664,7 +664,7 @@ impl Value {
   }
 
   #[inline(always)]
-  pub fn number_value<'s>(&self, scope: &mut HandleScope<'s>) -> Option<f64> {
+  pub fn number_value(&self, scope: &mut HandleScope) -> Option<f64> {
     let mut out = Maybe::<f64>::default();
     unsafe {
       v8__Value__NumberValue(self, &*scope.get_current_context(), &mut out)
@@ -673,7 +673,7 @@ impl Value {
   }
 
   #[inline(always)]
-  pub fn integer_value<'s>(&self, scope: &mut HandleScope<'s>) -> Option<i64> {
+  pub fn integer_value(&self, scope: &mut HandleScope) -> Option<i64> {
     let mut out = Maybe::<i64>::default();
     unsafe {
       v8__Value__IntegerValue(self, &*scope.get_current_context(), &mut out)
@@ -682,7 +682,7 @@ impl Value {
   }
 
   #[inline(always)]
-  pub fn uint32_value<'s>(&self, scope: &mut HandleScope<'s>) -> Option<u32> {
+  pub fn uint32_value(&self, scope: &mut HandleScope) -> Option<u32> {
     let mut out = Maybe::<u32>::default();
     unsafe {
       v8__Value__Uint32Value(self, &*scope.get_current_context(), &mut out)
@@ -691,7 +691,7 @@ impl Value {
   }
 
   #[inline(always)]
-  pub fn int32_value<'s>(&self, scope: &mut HandleScope<'s>) -> Option<i32> {
+  pub fn int32_value(&self, scope: &mut HandleScope) -> Option<i32> {
     let mut out = Maybe::<i32>::default();
     unsafe {
       v8__Value__Int32Value(self, &*scope.get_current_context(), &mut out)
@@ -700,7 +700,7 @@ impl Value {
   }
 
   #[inline(always)]
-  pub fn boolean_value<'s>(&self, scope: &mut HandleScope<'s, ()>) -> bool {
+  pub fn boolean_value(&self, scope: &mut HandleScope<'_, ()>) -> bool {
     unsafe { v8__Value__BooleanValue(self, scope.get_isolate_ptr()) }
   }
 
@@ -723,5 +723,93 @@ impl Value {
       scope.cast_local(|sd| v8__Value__TypeOf(self, sd.get_isolate_ptr()))
     }
     .unwrap()
+  }
+
+  /// Utility method that returns human readable representation of the
+  /// underlying value.
+  pub fn type_repr(&self) -> &'static str {
+    if self.is_module_namespace_object() {
+      "Module"
+    } else if self.is_wasm_module_object() {
+      "WASM module"
+    } else if self.is_wasm_memory_object() {
+      "WASM memory object"
+    } else if self.is_proxy() {
+      "Proxy"
+    } else if self.is_shared_array_buffer() {
+      "SharedArrayBuffer"
+    } else if self.is_data_view() {
+      "DataView"
+    } else if self.is_big_uint64_array() {
+      "BigUint64Array"
+    } else if self.is_big_int64_array() {
+      "BigInt64Array"
+    } else if self.is_float64_array() {
+      "Float64Array"
+    } else if self.is_float32_array() {
+      "Float32Array"
+    } else if self.is_int32_array() {
+      "Int32Array"
+    } else if self.is_uint32_array() {
+      "Uint32Array"
+    } else if self.is_int16_array() {
+      "Int16Array"
+    } else if self.is_uint16_array() {
+      "Uint16Array"
+    } else if self.is_int8_array() {
+      "Int8Array"
+    } else if self.is_uint8_clamped_array() {
+      "Uint8ClampedArray"
+    } else if self.is_uint8_array() {
+      "Uint8Array"
+    } else if self.is_typed_array() {
+      "TypedArray"
+    } else if self.is_array_buffer_view() {
+      "ArrayBufferView"
+    } else if self.is_array_buffer() {
+      "ArrayBuffer"
+    } else if self.is_weak_set() {
+      "WeakSet"
+    } else if self.is_weak_map() {
+      "WeakMap"
+    } else if self.is_set_iterator() {
+      "Set Iterator"
+    } else if self.is_map_iterator() {
+      "Map Iterator"
+    } else if self.is_set() {
+      "Set"
+    } else if self.is_map() {
+      "Map"
+    } else if self.is_promise() {
+      "Promise"
+    } else if self.is_generator_function() {
+      "Generator function"
+    } else if self.is_async_function() {
+      "Async function"
+    } else if self.is_reg_exp() {
+      "RegExp"
+    } else if self.is_date() {
+      "Date"
+    } else if self.is_number() {
+      "Number"
+    } else if self.is_boolean() {
+      "Boolean"
+    } else if self.is_big_int() {
+      "bigint"
+    } else if self.is_array() {
+      "array"
+    } else if self.is_function() {
+      "function"
+    } else if self.is_symbol() {
+      "symbol"
+    } else if self.is_string() {
+      "string"
+    } else if self.is_null() {
+      "null"
+    } else if self.is_undefined() {
+      "undefined"
+    } else {
+      "unknown"
+    }
   }
 }
