@@ -11,6 +11,7 @@
 #include "unicode/locid.h"
 #include "v8-callbacks.h"
 #include "v8/include/libplatform/libplatform.h"
+#include "v8/include/v8-cppgc.h"
 #include "v8/include/v8-fast-api-calls.h"
 #include "v8/include/v8-inspector.h"
 #include "v8/include/v8-internal.h"
@@ -28,6 +29,8 @@
 #include "v8/src/objects/objects-inl.h"
 #include "v8/src/objects/objects.h"
 #include "v8/src/objects/smi.h"
+
+#include "cppgc/platform.h"
 
 using namespace support;
 
@@ -482,7 +485,7 @@ uint32_t v8__ScriptCompiler__CachedDataVersionTag() {
 size_t v8__TypedArray__Length(const v8::TypedArray* self) {
   return ptr_to_local(self)->Length();
 }
-size_t v8__TypedArray__kMaxLength() { return v8::TypedArray::kMaxLength; }
+size_t v8__TypedArray__kMaxByteLength() { return v8::TypedArray::kMaxByteLength; }
 
 bool v8__Data__EQ(const v8::Data& self, const v8::Data& other) {
   return ptr_to_local(&self) == ptr_to_local(&other);
@@ -1427,7 +1430,7 @@ int v8__Object__InternalFieldCount(const v8::Object& self) {
   return ptr_to_local(&self)->InternalFieldCount();
 }
 
-const v8::Value* v8__Object__GetInternalField(const v8::Object& self,
+const v8::Data* v8__Object__GetInternalField(const v8::Object& self,
                                               int index) {
   return local_to_ptr(ptr_to_local(&self)->GetInternalField(index));
 }
@@ -1445,8 +1448,8 @@ MaybeBool v8__Object__SetIntegrityLevel(const v8::Object& self,
 }
 
 void v8__Object__SetInternalField(const v8::Object& self, int index,
-                                  const v8::Value& value) {
-  ptr_to_local(&self)->SetInternalField(index, ptr_to_local(&value));
+                                  const v8::Data& data) {
+  ptr_to_local(&self)->SetInternalField(index, ptr_to_local(&data));
 }
 
 const v8::Value* v8__Object__GetPrivate(const v8::Object& self,
@@ -2305,7 +2308,11 @@ void v8__AllowJavascriptExecutionScope__DESTRUCT(
                                     size_t byte_offset, size_t length) { \
     return local_to_ptr(                                                 \
         v8::NAME::New(ptr_to_local(&buf_ptr), byte_offset, length));     \
+  }                                                                      \
+  size_t v8__##NAME##__kMaxLength() {                                    \
+    return v8::NAME::kMaxLength;                                         \
   }
+
 
 V(Uint8Array)
 V(Uint8ClampedArray)
@@ -3000,10 +3007,11 @@ const v8::Module* v8__Module__CreateSyntheticModule(
     v8::Isolate* isolate, const v8::String* module_name,
     size_t export_names_len, const v8::String* export_names_raw[],
     v8::Module::SyntheticModuleEvaluationSteps evaluation_steps) {
-  std::vector<v8::Local<v8::String>> export_names{};
+  std::vector<v8::Local<v8::String>> export_names_vec{};
   for (size_t i = 0; i < export_names_len; i += 1) {
-    export_names.push_back(ptr_to_local(export_names_raw[i]));
+    export_names_vec.push_back(ptr_to_local(export_names_raw[i]));
   }
+  auto export_names = v8::MemorySpan<const v8::Local<v8::String>>{export_names_vec.data(), export_names_len};
   return local_to_ptr(v8::Module::CreateSyntheticModule(
       isolate, ptr_to_local(module_name), export_names, evaluation_steps));
 }
@@ -3131,7 +3139,7 @@ void v8__HeapProfiler__TakeHeapSnapshot(v8::Isolate* isolate,
 
 v8::Isolate* v8__internal__GetIsolateFromHeapObject(const v8::Data& data) {
   namespace i = v8::internal;
-  i::Object object(reinterpret_cast<const i::Address&>(data));
+  i::Tagged<i::Object> object(reinterpret_cast<const i::Address&>(data));
   i::Isolate* isolate;
   return IsHeapObject(object) &&
                  i::GetIsolateFromHeapObject(object.GetHeapObject(), &isolate)
@@ -3141,7 +3149,7 @@ v8::Isolate* v8__internal__GetIsolateFromHeapObject(const v8::Data& data) {
 
 int v8__Value__GetHash(const v8::Value& data) {
   namespace i = v8::internal;
-  i::Object object(reinterpret_cast<const i::Address&>(data));
+  i::Tagged<i::Object> object(reinterpret_cast<const i::Address&>(data));
   i::Isolate* isolate;
   int hash = IsHeapObject(object) && i::GetIsolateFromHeapObject(
                                           object.GetHeapObject(), &isolate)
@@ -3189,6 +3197,13 @@ extern "C" {
 void v8__ValueSerializer__Delegate__ThrowDataCloneError(
     v8::ValueSerializer::Delegate* self, v8::Local<v8::String> message);
 
+bool v8__ValueSerializer__Delegate__HasCustomHostObject(
+    v8::ValueSerializer::Delegate* self, v8::Isolate* isolate);
+
+MaybeBool v8__ValueSerializer__Delegate__IsHostObject(
+    v8::ValueSerializer::Delegate* self, v8::Isolate* isolate,
+    v8::Local<v8::Object> object);
+
 MaybeBool v8__ValueSerializer__Delegate__WriteHostObject(
     v8::ValueSerializer::Delegate* self, v8::Isolate* isolate,
     v8::Local<v8::Object> object);
@@ -3212,6 +3227,16 @@ void v8__ValueSerializer__Delegate__FreeBufferMemory(
 struct v8__ValueSerializer__Delegate : public v8::ValueSerializer::Delegate {
   void ThrowDataCloneError(v8::Local<v8::String> message) override {
     v8__ValueSerializer__Delegate__ThrowDataCloneError(this, message);
+  }
+
+  bool HasCustomHostObject(v8::Isolate* isolate) override {
+    return v8__ValueSerializer__Delegate__HasCustomHostObject(this, isolate);
+  }
+
+  v8::Maybe<bool> IsHostObject(v8::Isolate* isolate,
+                                  v8::Local<v8::Object> object) override {
+    return maybe_bool_to_maybe(
+        v8__ValueSerializer__Delegate__IsHostObject(this, isolate, object));
   }
 
   v8::Maybe<bool> WriteHostObject(v8::Isolate* isolate,
@@ -3579,6 +3604,76 @@ void v8__PropertyDescriptor__set_enumerable(v8::PropertyDescriptor* self,
 void v8__PropertyDescriptor__set_configurable(v8::PropertyDescriptor* self,
                                               bool configurable) {
   self->set_configurable(configurable);
+}
+
+}  // extern "C"
+
+// cppgc
+
+extern "C" {
+
+using RustTraceFn = void (*)(void* obj, cppgc::Visitor*);
+using RustDestroyFn = void (*)(void* obj);
+
+class RustObj final: public cppgc::GarbageCollected<RustObj> {
+  public:
+    explicit RustObj(void* obj, RustTraceFn trace, RustDestroyFn destroy): trace_(trace), destroy_(destroy), obj_(obj) {}
+
+    ~RustObj() {
+      destroy_(obj_);
+    }
+
+    void Trace(cppgc::Visitor* visitor) const {
+      trace_(obj_, visitor);
+    }
+
+  private:
+    RustTraceFn trace_;
+    RustDestroyFn destroy_;
+    void* obj_;
+};
+
+void cppgc__initialize_process(v8::Platform* platform) {
+  cppgc::InitializeProcess(platform->GetPageAllocator());
+}
+
+void cppgc__shutdown_process() {
+  cppgc::ShutdownProcess();
+}
+
+v8::CppHeap* cppgc__heap__create(v8::Platform* platform, int wrappable_type_index,
+                                 int wrappable_instance_index, uint16_t embedder_id) {
+  std::unique_ptr<v8::CppHeap> heap = v8::CppHeap::Create(platform, v8::CppHeapCreateParams {
+    {},
+    v8::WrapperDescriptor(wrappable_type_index, wrappable_instance_index, embedder_id),
+  });
+  return heap.release();
+}
+
+void v8__Isolate__AttachCppHeap(v8::Isolate* isolate, v8::CppHeap* cpp_heap) { 
+  isolate->AttachCppHeap(cpp_heap);
+}
+
+v8::CppHeap* v8__Isolate__GetCppHeap(v8::Isolate* isolate) {
+  return isolate->GetCppHeap();
+}
+
+void cppgc__heap__DELETE(v8::CppHeap* self) { delete self; }
+
+void cppgc__heap__enable_detached_garbage_collections_for_testing(v8::CppHeap* heap) {
+  heap->EnableDetachedGarbageCollectionsForTesting();
+}
+
+void cppgc__heap__collect_garbage_for_testing(v8::CppHeap* heap, cppgc::EmbedderStackState stack_state) {  
+  heap->CollectGarbageForTesting(stack_state);
+}
+
+RustObj* cppgc__make_garbage_collectable(v8::CppHeap* heap, void* obj, RustTraceFn trace, RustDestroyFn destroy) {
+  return cppgc::MakeGarbageCollected<RustObj>(heap->GetAllocationHandle(), obj, trace, destroy);
+}
+
+void cppgc__visitor__trace(cppgc::Visitor* visitor, RustObj* member) {
+  visitor->Trace(*member);
 }
 
 }  // extern "C"
